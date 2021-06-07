@@ -6,7 +6,8 @@ class DevTaskRun extends DataObject
 		'Task' => 'Varchar(150)',
 		'Params' => 'Varchar(255)',
 		'Status' => 'Enum("Queued,Running,Finished", "Queued")',
-		'FinishDate' => 'SS_Datetime'
+		'FinishDate' => 'SS_Datetime',
+        'Output' => 'Text',
 	);
 
 	private static $summary_fields = array(

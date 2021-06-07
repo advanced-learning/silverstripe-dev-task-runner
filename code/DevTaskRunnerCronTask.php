@@ -40,10 +40,14 @@ class DevTaskRunnerCronTask implements CronTask
 			$nextTask->write();
 
 			$request = new SS_HTTPRequest('GET', 'dev/tasks/' . $nextTask->Task, $paramList);
-			$task->run($request);
 
-			$nextTask->Status = 'Finished';
+			ob_start();
+			$task->run($request);
+            $output = ob_get_clean();
+
+            $nextTask->Status = 'Finished';
 			$nextTask->FinishDate = SS_Datetime::now()->getValue();
+			$nextTask->Output = $output;
 			$nextTask->write();
 
 			echo 'Finished task ' . $task->getTitle() . "\n";
