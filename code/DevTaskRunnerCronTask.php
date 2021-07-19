@@ -37,20 +37,32 @@ class DevTaskRunnerCronTask implements CronTask
 			echo 'Starting task ' . $task->getTitle() . "\n";
 			//remove so it doesn't get rerun
 			$nextTask->Status = 'Running';
+			$nextTask->StartDate = SS_Datetime::now()->getValue();
 			$nextTask->write();
 
 			$request = new SS_HTTPRequest('GET', 'dev/tasks/' . $nextTask->Task, $paramList);
 
 			ob_start();
-			$task->run($request);
-            $output = ob_get_clean();
+			try {
+				$task->run($request);
+				$output = ob_get_clean();
+				$wasError = false;
+			} catch (Throwable $e) {
+				$errorClass = get_class($e);
+				$output = "Task threw $errorClass.\n" .
+					"Message: {$e->getMessage()}\n" .
+					"Code: {$e->getCode()}\n" .
+					"Trace: {$e->getTraceAsString()}";
+				$wasError = true;
+				ob_clean();
+			}
 
-            $nextTask->Status = 'Finished';
+			$nextTask->Status = $wasError ? 'Error' : 'Finished';
 			$nextTask->FinishDate = SS_Datetime::now()->getValue();
 			$nextTask->Output = $output;
 			$nextTask->write();
 
-			echo 'Finished task ' . $task->getTitle() . "\n";
+			echo 'Finished task ' . ($wasError ? '(with error) ' : '') . $task->getTitle() . "\n";
 		}
 	}
 }
