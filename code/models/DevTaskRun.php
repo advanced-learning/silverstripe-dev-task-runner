@@ -80,6 +80,12 @@ class DevTaskRun extends DataObject
 	}
 
 	public function TaskTitle() {
+	    if (!class_exists($this->Task)) {
+            return "Deleted Task - $this->Task";
+        }
+        if (!method_exists($this->Task, 'getTitle')) {
+            return "$this->Task";
+        }
 		return singleton($this->Task)->getTitle();
 	}
 
