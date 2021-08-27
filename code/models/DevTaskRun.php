@@ -63,8 +63,15 @@ class DevTaskRun extends DataObject
 					ReadonlyField::create('Params', 'Params', $this->Params),
 					ReadonlyField::create('StartDate', 'Start Date', $this->StartDate),
 					ReadonlyField::create('FinishDate', 'Finish Date', $this->FinishDate),
-					ReadonlyField::create('Output', 'Output', $this->Output),
 				]
+			);
+			$fields->addFieldToTab(
+				'Root.Output',
+				ReadonlyField::create('Output', '', $this->Output)
+			);
+			$fields->addFieldToTab(
+				'Root.Output as HTML',
+				LiteralField::create('OutputAsHtml', $this->Output)
 			);
 
 			$addStatusBefore = 'StartDate';
@@ -80,12 +87,12 @@ class DevTaskRun extends DataObject
 	}
 
 	public function TaskTitle() {
-	    if (!class_exists($this->Task)) {
-            return "Deleted Task - $this->Task";
-        }
-        if (!method_exists($this->Task, 'getTitle')) {
-            return "$this->Task";
-        }
+		if (!class_exists($this->Task)) {
+			return "Deleted Task - $this->Task";
+		}
+		if (!method_exists($this->Task, 'getTitle')) {
+			return "$this->Task";
+		}
 		return singleton($this->Task)->getTitle();
 	}
 
