@@ -44,13 +44,10 @@ class DevTaskAdmin extends ModelAdmin
         $req = $this->getRequest();
 
         if ($req) {
-            $params = $req->requestVar('Task');
+            $task = trim($req->requestVar('Task'));
 
-            if ($params) {
-                $migrationTasks = DB::query(
-                    "SELECT Task FROM DevTaskRun WHERE Task = '{$params}'"
-                )->column('Task');
-                $list = $list->filter('Task', $migrationTasks);
+            if ($task) {
+                $list = $list->filter('Task', $task);
             }
         }
         return $list;
