@@ -19,4 +19,37 @@ class DevTaskAdmin extends ModelAdmin
 
 		return $form;
 	}
+
+    /**
+     * @return SearchContext
+     */
+    public function getSearchContext(): SearchContext
+    {
+        $context = parent::getSearchContext();
+
+        $context->getFields()->push(
+            new TextField('Task', 'Task (exact match)')
+        );
+
+        return $context;
+    }
+
+    /**
+     * @return DataList|SS_List
+     */
+    public function getList()
+    {
+        $list = parent::getList();
+
+        $req = $this->getRequest();
+
+        if ($req) {
+            $task = trim($req->requestVar('Task'));
+
+            if ($task) {
+                $list = $list->filter('Task', $task);
+            }
+        }
+        return $list;
+    }
 }
