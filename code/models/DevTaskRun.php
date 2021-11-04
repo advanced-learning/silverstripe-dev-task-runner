@@ -17,6 +17,7 @@ class DevTaskRun extends DataObject
 		'Status' => 'Status',
 		'StartDate' => 'Start Date',
 		'FinishDate' => 'Finish Date',
+		'OutputPreview' => 'Output Preview',
 	);
 
 	private static $default_sort = 'Created DESC';
@@ -94,6 +95,11 @@ class DevTaskRun extends DataObject
 			return "$this->Task";
 		}
 		return singleton($this->Task)->getTitle();
+	}
+
+	public function OutputPreview()
+	{
+		return $this->Output ? (substr($this->Output, 0, 30) . '...') : '';
 	}
 
 	public static function get_next_task()
