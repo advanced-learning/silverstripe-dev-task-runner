@@ -95,11 +95,16 @@ class DevTaskRun extends DataObject
 				);
 			}
 
-			$fields->addFieldToTab(
-				'Root.Main',
-				ReadonlyField::create('Description', 'Description', $this->getDesc()),
-				'Params'
-			);
+            $fields->addFieldToTab(
+                'Root.Main',
+                LiteralField::create(
+                    'Description',
+                    "<div style='margin: 8px 0;'>" .
+                    "<p>Description:</p>" . $this->getDesc() .
+                    "</div>"
+                ),
+                'Params'
+            );
 		}
 
 		if (!$this->exists() || $this->Status === 'Draft' || $this->Status === 'Queued') {
