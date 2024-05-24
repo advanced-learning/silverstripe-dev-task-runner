@@ -44,7 +44,7 @@ class DevTaskAdmin extends ModelAdmin
         $req = $this->getRequest();
 
         if ($req) {
-            $task = trim($req->requestVar('Task'));
+            $task = trim($req->requestVar('Task') ?? "");
 
             if ($task) {
                 $list = $list->filter('Task', $task);
