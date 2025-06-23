@@ -1,5 +1,13 @@
 <?php
 
+/**
+ * @property string|null Task
+ * @property string|null Params
+ * @property string Status
+ * @property string|null StartDate
+ * @property string|null FinishDate
+ * @property string|null Output
+ */
 class DevTaskRun extends DataObject
 {
 	private static $db = array(
@@ -95,16 +103,16 @@ class DevTaskRun extends DataObject
 				);
 			}
 
-            $fields->addFieldToTab(
-                'Root.Main',
-                LiteralField::create(
-                    'Description',
-                    "<div style='margin: 8px 0;'>" .
-                    "<p>Description:</p>" . $this->getDesc() .
-                    "</div>"
-                ),
-                'Params'
-            );
+			$fields->addFieldToTab(
+				'Root.Main',
+				LiteralField::create(
+					'Description',
+					"<div style='margin: 8px 0;'>" .
+					"<p>Description:</p>" . $this->getDesc() .
+					"</div>"
+				),
+				'Params'
+			);
 		}
 
 		if (!$this->exists() || $this->Status === 'Draft' || $this->Status === 'Queued') {
@@ -184,6 +192,9 @@ class DevTaskRun extends DataObject
 		return $this->Output ? (substr($this->Output, 0, 30) . '...') : '';
 	}
 
+    /**
+     * @return self|null
+     */
 	public static function get_next_task()
 	{
 		return DevTaskRun::get()->filter('Status', 'Queued')->sort('Created ASC')->first();
