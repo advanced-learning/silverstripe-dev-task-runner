@@ -8,4 +8,4 @@
 
 SilverStripe module for running dev tasks through the CMS.
 
-Uses cron task to pull tasks off a queue one at a time.
+Uses cron task to pull tasks off a queue up to three at a time.

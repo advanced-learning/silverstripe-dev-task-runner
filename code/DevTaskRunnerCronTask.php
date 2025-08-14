@@ -2,78 +2,130 @@
 
 class DevTaskRunnerCronTask implements CronTask
 {
-	private static $schedule = '*/2 * * * *';
+    private static $schedule = '* * * * *';
 
-	private $nextTask = null;
+    private $nextTask = null;
 
-	/**
-	 * @param DevTaskRun $nextTask
-	 *
-	 * @return void
-	 */
-	public function setNextTask(DevTaskRun $nextTask): void
-	{
-		$this->nextTask = $nextTask;
-	}
+    /**
+     * The maximum number of tasks to run in a single `process`.
+     * @see process
+     * @var integer
+     */
+    private static $maxTasksPerRun = 3;
 
-	public function getSchedule() {
-		return Config::inst()->get('DevTaskRunnerCronTask', 'schedule');
-	}
+    /**
+     * @param DevTaskRun $nextTask
+     *
+     * @return void
+     */
+    public function setNextTask(DevTaskRun $nextTask): void
+    {
+        $this->nextTask = $nextTask;
+    }
 
-	public function process() {
-		$nextTask = $this->nextTask ?? DevTaskRun::get_next_task();
+    public function getSchedule() {
+        return Config::inst()->get('DevTaskRunnerCronTask', 'schedule');
+    }
 
-		if (!$nextTask) {
-			return;
-		}
+    /**
+     * Processes tasks. It will run the manually specified `nextTask` first,
+     * then continue to process tasks from the queue until the maximum
+     * number of tasks for this run has been reached.
+     */
+    public function process()
+    {
+        $tasksToRun = [];
 
-		//create task instance
-		$task = Injector::inst()->create($nextTask->Task);
+        // If a specific task has been provided, add it as the first one to run.
+        if ($this->nextTask) {
+            echo "A specific task was provided. It will be run first.\n";
+            $tasksToRun[] = $this->nextTask;
+        }
 
-		//get params
-		$params = explode(' ', $nextTask->Params);
-		$paramList = array();
-		if ($params) {
-			foreach ($params as $param) {
-				$parts = explode('=', $param);
+        echo "Building task list for this run. Max tasks: " . self::$maxTasksPerRun . "\n";
 
-				if (count($parts) === 2) {
-					$value = $parts[1];
-					$value = json_decode($value, true) ?: $value;
+        // Fill the rest of the run with tasks from the queue, up to the maximum.
+        while (count($tasksToRun) < self::$maxTasksPerRun) {
+            $taskFromQueue = DevTaskRun::get_next_task();
 
-					$paramList[$parts[0]] = $value;
-				}
-			}
-		}
+            // If the queue is empty, stop adding tasks.
+            if (!$taskFromQueue) {
+                break;
+            }
 
-		echo 'Starting task ' . $task->getTitle() . "\n";
-		//remove so it doesn't get rerun
-		$nextTask->Status = 'Running';
-		$nextTask->StartDate = SS_Datetime::now()->getValue();
-		$nextTask->write();
+            $tasksToRun[] = $taskFromQueue;
+        }
 
-		$request = new SS_HTTPRequest('GET', 'dev/tasks/' . $nextTask->Task, $paramList);
+        if (empty($tasksToRun)) {
+            echo "No tasks to run. Finishing run.\n";
+            return;
+        }
 
-		ob_start();
-		try {
-			$task->run($request);
-			$output = ob_get_clean();
-			$wasError = false;
-		} catch (Throwable $e) {
-			$errorClass = get_class($e);
-			$output = "Task threw $errorClass.\n" .
-				"Message: {$e->getMessage()}\n" .
-				"Code: {$e->getCode()}\n" .
-				"Trace: {$e->getTraceAsString()}";
-			$wasError = true;
-			ob_clean();
-		}
+        echo "Starting task processing run for " . count($tasksToRun) . " task(s).\n";
 
-		$nextTask->Status = $wasError ? 'Error' : 'Finished';
-		$nextTask->FinishDate = SS_Datetime::now()->getValue();
-		$nextTask->Output = $output;
-		$nextTask->write();
+        // Now, execute all the tasks that have been collected.
+        foreach ($tasksToRun as $task) {
+            $this->runTask($task);
+        }
 
-		echo 'Finished task ' . ($wasError ? '(with error) ' : '') . $task->getTitle() . "\n";
-	}
+        echo "Task processing run finished.\n";
+    }
+
+    /**
+     * Executes a single DevTaskRun record.
+     *
+     * @param DevTaskRun $taskToRun The task object to run.
+     */
+    private function runTask(DevTaskRun $taskToRun)
+    {
+        // Create an instance of the task class
+        $task = Injector::inst()->create($taskToRun->Task);
+
+        // Parse the parameters for the task
+        $params = explode(' ', $taskToRun->Params);
+        $paramList = [];
+        if ($params) {
+            foreach ($params as $param) {
+                $parts = explode('=', $param, 2); // Ensure we only split on the first '='
+
+                if (count($parts) === 2) {
+                    $value = $parts[1];
+                    // Attempt to decode JSON, otherwise use the raw string value
+                    $decodedValue = json_decode($value, true);
+                    $paramList[$parts[0]] = ($decodedValue !== null) ? $decodedValue : $value;
+                }
+            }
+        }
+
+        echo 'Starting task: ' . $task->getTitle() . ' (ID: ' . $taskToRun->ID . ")\n";
+        // Update the task status to 'Running' to prevent it from being picked up again
+        $taskToRun->Status = 'Running';
+        $taskToRun->StartDate = SS_Datetime::now()->getValue();
+        $taskToRun->write();
+
+        $request = new SS_HTTPRequest('GET', 'dev/tasks/' . $taskToRun->Task, $paramList);
+
+        // Capture output and handle potential errors
+        ob_start();
+        try {
+            $task->run($request);
+            $output = ob_get_clean();
+            $wasError = false;
+        } catch (Throwable $e) {
+            $output = (string) $e;
+            $wasError = true;
+            // Ensure the output buffer is cleaned on error
+            if (ob_get_level() > 0) {
+                ob_end_clean();
+            }
+        }
+
+        // Update the task with the final status, output, and finish time
+        $taskToRun->Status = $wasError ? 'Error' : 'Finished';
+        $taskToRun->FinishDate = SS_Datetime::now()->getValue();
+        $taskToRun->Output = $output;
+        $taskToRun->write();
+
+        echo 'Finished task ' . $task->getTitle() . ($wasError ? ' (with error)' : '') . "\n";
+    }
 }
