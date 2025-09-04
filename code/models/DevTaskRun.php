@@ -10,23 +10,25 @@
  */
 class DevTaskRun extends DataObject
 {
-	private static $db = array(
+	private static $db = [
 		'Task' => 'Varchar(150)',
 		'Params' => 'Varchar(255)',
 		'Status' => 'Enum("Draft,Queued,Running,Finished,Error", "Draft")',
 		'StartDate' => 'SS_Datetime',
 		'FinishDate' => 'SS_Datetime',
 		'Output' => 'Text',
-	);
+    ];
 
-	private static $summary_fields = array(
+	private static $summary_fields = [
+        'ID',
 		'TaskTitle' => 'Task',
 		'Params' => 'Params',
 		'Status' => 'Status',
+        'Created' => 'Created',
 		'StartDate' => 'Start Date',
 		'FinishDate' => 'Finish Date',
 		'OutputPreview' => 'Output Preview',
-	);
+    ];
 
 	private static $default_sort = 'Created DESC';
 
@@ -82,6 +84,12 @@ class DevTaskRun extends DataObject
 
 			$addStatusBefore = 'Instruction';
 		} else {
+            $fields->addFieldToTab(
+                'Root.Main',
+                ReadonlyField::create('Created', 'Created', $this->Created),
+                'StartDate'
+            );
+
 			$fields->addFieldToTab(
 				'Root.Main',
 				ReadonlyField::create('Task', 'Task', $this->TaskTitle()),
@@ -190,13 +198,5 @@ class DevTaskRun extends DataObject
 	public function OutputPreview()
 	{
 		return $this->Output ? (substr($this->Output, 0, 30) . '...') : '';
-	}
-
-    /**
-     * @return self|null
-     */
-	public static function get_next_task()
-	{
-		return DevTaskRun::get()->filter('Status', 'Queued')->sort('Created ASC')->first();
 	}
 }

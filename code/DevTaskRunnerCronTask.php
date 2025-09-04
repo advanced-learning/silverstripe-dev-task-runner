@@ -14,16 +14,17 @@ class DevTaskRunnerCronTask implements CronTask
     private static $maxTasksPerRun = 3;
 
     /**
-     * @param DevTaskRun $nextTask
+     * @param DevTaskRun|null $nextTask
      *
      * @return void
      */
-    public function setNextTask(DevTaskRun $nextTask): void
+    public function setNextTask(?DevTaskRun $nextTask): void
     {
         $this->nextTask = $nextTask;
     }
 
-    public function getSchedule() {
+    public function getSchedule(): string
+    {
         return Config::inst()->get('DevTaskRunnerCronTask', 'schedule');
     }
 
@@ -32,9 +33,12 @@ class DevTaskRunnerCronTask implements CronTask
      * then continue to process tasks from the queue until the maximum
      * number of tasks for this run has been reached.
      */
-    public function process()
+    public function process(): void
     {
+        /** @var DevTaskRun[] $tasksToRun */
         $tasksToRun = [];
+        /** @var int[] $tasksToRunIds */
+        $tasksToRunIds = [];
 
         // If a specific task has been provided, add it as the first one to run.
         if ($this->nextTask) {
@@ -46,7 +50,11 @@ class DevTaskRunnerCronTask implements CronTask
 
         // Fill the rest of the run with tasks from the queue, up to the maximum.
         while (count($tasksToRun) < self::$maxTasksPerRun) {
-            $taskFromQueue = DevTaskRun::get_next_task();
+            $taskFromQueue = DevTaskRun::get()
+                ->filter('Status', 'Queued')
+                ->exclude('ID', $tasksToRunIds)
+                ->sort('Created ASC')
+                ->first();
 
             // If the queue is empty, stop adding tasks.
             if (!$taskFromQueue) {
@@ -54,6 +62,7 @@ class DevTaskRunnerCronTask implements CronTask
             }
 
             $tasksToRun[] = $taskFromQueue;
+            $tasksToRunIds[] = $taskFromQueue->ID;
         }
 
         if (empty($tasksToRun)) {
