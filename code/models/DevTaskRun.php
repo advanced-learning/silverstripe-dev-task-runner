@@ -12,7 +12,7 @@ class DevTaskRun extends DataObject
 {
 	private static $db = [
 		'Task' => 'Varchar(150)',
-		'Params' => 'Varchar(255)',
+		'Params' => 'Text',
 		'Status' => 'Enum("Draft,Queued,Running,Finished,Error", "Draft")',
 		'StartDate' => 'SS_Datetime',
 		'FinishDate' => 'SS_Datetime',
