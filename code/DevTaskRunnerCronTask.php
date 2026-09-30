@@ -114,6 +114,11 @@ class DevTaskRunnerCronTask implements CronTask
 
         $request = new SS_HTTPRequest('GET', 'dev/tasks/' . $taskToRun->Task, $paramList);
 
+        // Up to maxTasksPerRun tasks run one after another in this PHP process. These hooks let an
+        // extension on DevTaskRun prepare and clean up around each one, for example to reset static
+        // state that one task could otherwise leave behind for the next.
+        $taskToRun->extend('onBeforeRun', $task);
+
         // Capture output and handle potential errors
         ob_start();
         try {
@@ -128,6 +133,9 @@ class DevTaskRunnerCronTask implements CronTask
                 ob_end_clean();
             }
         }
+
+        // Runs whether or not the task failed: every Throwable is caught above.
+        $taskToRun->extend('onAfterRun', $task, $wasError);
 
         // Update the task with the final status, output, and finish time
         $taskToRun->Status = $wasError ? 'Error' : 'Finished';
