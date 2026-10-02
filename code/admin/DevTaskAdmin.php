@@ -17,6 +17,14 @@ class DevTaskAdmin extends ModelAdmin
 		$nextRun = $cron->getNextRunDate()->format('Y-m-d H:i:s');
 		$form->Fields()->unshift(LiteralField::create('NextRunMessage', '<p class="message">Next run at ' . $nextRun . '</p>'));
 
+		$gridField = $form->Fields()->fieldByName($this->sanitiseClassName('DevTaskRun'));
+		if ($gridField instanceof GridField) {
+			$detailForm = $gridField->getConfig()->getComponentByType('GridFieldDetailForm');
+			if ($detailForm) {
+				$detailForm->setItemRequestClass('DevTaskRunItemRequest');
+			}
+		}
+
 		return $form;
 	}
 

@@ -7,16 +7,23 @@
  * @property string|null StartDate
  * @property string|null FinishDate
  * @property string|null Output
+ * @property string|null Host
+ * @property string|null FailureReason
+ * @property bool CancelRequested
  */
 class DevTaskRun extends DataObject
 {
 	private static $db = [
 		'Task' => 'Varchar(150)',
 		'Params' => 'Text',
-		'Status' => 'Enum("Draft,Queued,Running,Finished,Error", "Draft")',
+		'Status' => 'Enum("Draft,Queued,Running,Finished,Error,Cancelled", "Draft")',
 		'StartDate' => 'SS_Datetime',
 		'FinishDate' => 'SS_Datetime',
 		'Output' => 'Text',
+		// The host (on Kubernetes, the pod) that ran the task.
+		'Host' => 'Varchar(255)',
+		'FailureReason' => 'Text',
+		'CancelRequested' => 'Boolean',
     ];
 
 	private static $summary_fields = [
@@ -44,6 +51,7 @@ class DevTaskRun extends DataObject
 	public function getCMSFields(): FieldList
 	{
 		$fields = parent::getCMSFields();
+		$fields->removeByName(['Host', 'FailureReason', 'CancelRequested']);
 
 		$addStatusBefore = '';
 
@@ -133,8 +141,16 @@ class DevTaskRun extends DataObject
 				[
 					ReadonlyField::create('StartDate', 'Start Date', $this->StartDate),
 					ReadonlyField::create('FinishDate', 'Finish Date', $this->FinishDate),
+					ReadonlyField::create('Host', 'Host', $this->Host),
 				]
 			);
+
+			if ($this->FailureReason) {
+				$fields->addFieldToTab(
+					'Root.Main',
+					ReadonlyField::create('FailureReason', 'Failure reason', $this->FailureReason)
+				);
+			}
 
 			$fields->addFieldToTab(
 				'Root.Output',
@@ -150,7 +166,7 @@ class DevTaskRun extends DataObject
 
 		$fields->addFieldToTab(
 			'Root.Main',
-			ReadonlyField::create('Status', 'Status', $this->Status ?: 'Draft'),
+			ReadonlyField::create('Status', 'Status', $this->StatusLabel()),
 			$addStatusBefore
 		);
 
@@ -168,6 +184,108 @@ class DevTaskRun extends DataObject
 			$this->Status = 'Queued';
 			$this->write();
 		}
+	}
+
+	/**
+	 * Marks a Queued run as Running for this process. Only one process can
+	 * claim a run, because the update only matches while the run is Queued.
+	 *
+	 * @param string $host The host (pod) that will run the task.
+	 *
+	 * @return bool True if this process claimed the run.
+	 */
+	public function claim(string $host): bool
+	{
+		$now = SS_Datetime::now()->getValue();
+
+		DB::prepared_query(
+			'UPDATE "DevTaskRun"'
+			. ' SET "Status" = \'Running\', "StartDate" = ?, "Host" = ?, "LastEdited" = ?'
+			. ' WHERE "ID" = ? AND "Status" = \'Queued\'',
+			[$now, $host, $now, $this->ID]
+		);
+
+		if (DB::affected_rows() !== 1) {
+			return false;
+		}
+
+		$this->Status = 'Running';
+		$this->StartDate = $now;
+		$this->Host = $host;
+
+		return true;
+	}
+
+	/**
+	 * Whether an admin can cancel this run now.
+	 */
+	public function canCancel(): bool
+	{
+		return $this->Status === 'Queued'
+			|| ($this->Status === 'Running' && !$this->CancelRequested);
+	}
+
+	/**
+	 * Cancels the run. A Queued run gets the Cancelled status and does not
+	 * start. A Running run gets a cancel request, and the task stops at its
+	 * next DevTaskRun::checkCancelled() call.
+	 *
+	 * @return string|null 'cancelled', 'requested', or null when the run was
+	 *     no longer Queued or Running.
+	 */
+	public function cancel(): ?string
+	{
+		$now = SS_Datetime::now()->getValue();
+
+		DB::prepared_query(
+			'UPDATE "DevTaskRun"'
+			. ' SET "Status" = \'Cancelled\', "FinishDate" = ?, "LastEdited" = ?'
+			. ' WHERE "ID" = ? AND "Status" = \'Queued\'',
+			[$now, $now, $this->ID]
+		);
+		if (DB::affected_rows() === 1) {
+			return 'cancelled';
+		}
+
+		DB::prepared_query(
+			'UPDATE "DevTaskRun"'
+			. ' SET "CancelRequested" = 1, "LastEdited" = ?'
+			. ' WHERE "ID" = ? AND "Status" = \'Running\'',
+			[$now, $this->ID]
+		);
+		if (DB::affected_rows() === 1) {
+			return 'requested';
+		}
+
+		return null;
+	}
+
+	/**
+	 * Call this from a task at safe points, for example between batches.
+	 * When an admin has cancelled the run, it throws DevTaskCancelledException
+	 * and the runner marks the run as Cancelled. Do not catch that exception.
+	 * Does nothing when the task does not run through the dev task runner.
+	 *
+	 * @throws DevTaskCancelledException
+	 */
+	public static function checkCancelled(): void
+	{
+		$monitor = DevTaskRunMonitor::current();
+
+		if ($monitor) {
+			$monitor->checkCancelled();
+		}
+	}
+
+	public function StatusLabel(): string
+	{
+		$status = $this->Status ?: 'Draft';
+
+		if ($status === 'Running' && $this->CancelRequested) {
+			return 'Running (cancel requested)';
+		}
+
+		return $status;
 	}
 
 	public function getDesc(): string
