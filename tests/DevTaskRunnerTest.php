@@ -183,6 +183,39 @@ class DevTaskRunnerTest extends SapphireTest
         $this->assertEquals('partial', $saved->Output);
     }
 
+    public function testStatusSurvivesRollbackOfTaskTransaction()
+    {
+        $run = $this->createRun('Queued');
+        $run->claim('pod-a');
+
+        $monitor = new DevTaskRunMonitor($run);
+        $monitor->start();
+        DB::get_conn()->transactionStart();
+        try {
+            echo 'partial';
+            error_clear_last();
+            DevTaskRunMonitor::handleShutdown();
+        } finally {
+            // MySQL does this when the dying process's connection closes.
+            DB::get_conn()->transactionRollback();
+        }
+
+        $saved = DevTaskRun::get()->byID($run->ID);
+        $this->assertEquals('Error', $saved->Status);
+        $this->assertEquals('partial', $saved->Output);
+    }
+
+    public function testCancelIsSeenInsideTaskTransaction()
+    {
+        $run = $this->createRun('Queued', 'mode=cancelInTransaction');
+
+        $this->process();
+
+        $saved = DevTaskRun::get()->byID($run->ID);
+        $this->assertEquals('Cancelled', $saved->Status);
+        $this->assertStringNotContainsString('after check', $saved->Output);
+    }
+
     public function testFinishDoesNotOverwriteAnEndedRun()
     {
         $run = $this->createRun('Queued');
@@ -263,6 +296,26 @@ class DevTaskRunnerTest_Task extends BuildTask implements TestOnly
         self::$outputSeenMidRun = null;
     }
 
+    /**
+     * A connection that stands in for an admin's web request.
+     */
+    public static function adminConn(): SS_Database
+    {
+        $database = DB::get_conn()->getSelectedDatabase();
+        $conn = DB::get_conn('DevTaskRunnerTest_admin');
+
+        if (!$conn) {
+            global $databaseConfig;
+            $config = $databaseConfig;
+            $config['database'] = $database;
+            $conn = DB::connect($config, 'DevTaskRunnerTest_admin');
+        } elseif ($conn->getSelectedDatabase() !== $database) {
+            $conn->selectDatabase($database);
+        }
+
+        return $conn;
+    }
+
     public function run($request)
     {
         $run = DevTaskRun::get()->byID(DevTaskRunMonitor::current()->getRunID());
@@ -285,6 +338,22 @@ class DevTaskRunnerTest_Task extends BuildTask implements TestOnly
                 $run->cancel();
                 DevTaskRun::checkCancelled();
                 echo 'after check';
+                return;
+            case 'cancelInTransaction':
+                DB::get_conn()->transactionStart();
+                try {
+                    // The first read fixes the transaction's snapshot.
+                    DB::query('SELECT COUNT(*) FROM "DevTaskRun"')->value();
+                    // An admin cancels the run from another connection.
+                    self::adminConn()->preparedQuery(
+                        'UPDATE "DevTaskRun" SET "CancelRequested" = 1 WHERE "ID" = ?',
+                        [$run->ID]
+                    );
+                    DevTaskRun::checkCancelled();
+                    echo 'after check';
+                } finally {
+                    DB::get_conn()->transactionRollback();
+                }
                 return;
             default:
                 echo 'hello ' . $request->getVar('name');

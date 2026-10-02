@@ -11,6 +11,12 @@
  *   to stop. This needs the pcntl extension, and PHP must receive the signal:
  *   on Kubernetes, start cli.php with `exec` (or directly), not as a child of
  *   `/bin/sh -c`, because the shell does not pass the signal on.
+ *
+ * The monitor reads and writes the run on its own database connection. The
+ * task may have a transaction open on the default connection, and that
+ * transaction is rolled back when the process dies. On a separate connection
+ * the run's status and output still commit, and cancel checks see the latest
+ * value instead of the transaction's snapshot.
  */
 class DevTaskRunMonitor
 {
@@ -19,6 +25,11 @@ class DevTaskRunMonitor
      * room for the truncation note.
      */
     const OUTPUT_LIMIT = 16000000;
+
+    /**
+     * Name of the monitor's own database connection.
+     */
+    const CONNECTION = 'DevTaskRunMonitor';
 
     /**
      * Seconds between saves of new output to the run.
@@ -78,11 +89,14 @@ class DevTaskRunMonitor
     }
 
     /**
-     * Registers the shutdown and signal handlers. Call this once, before the
-     * first run is claimed.
+     * Registers the shutdown and signal handlers, and opens the monitor's
+     * database connection. Call this before the first run is claimed, so that
+     * a connection failure stops the process before it claims a run.
      */
     public static function registerHandlers(): void
     {
+        self::conn();
+
         if (self::$handlersRegistered) {
             return;
         }
@@ -96,6 +110,28 @@ class DevTaskRunMonitor
             pcntl_signal(SIGTERM, ['DevTaskRunMonitor', 'handleSignal']);
             pcntl_signal(SIGINT, ['DevTaskRunMonitor', 'handleSignal']);
         }
+    }
+
+    /**
+     * The monitor's own database connection, on the same database as the
+     * default connection.
+     */
+    public static function conn(): SS_Database
+    {
+        $database = DB::get_conn()->getSelectedDatabase();
+        $conn = DB::get_conn(self::CONNECTION);
+
+        if (!$conn) {
+            global $databaseConfig;
+            $config = $databaseConfig;
+            $config['database'] = $database;
+            $conn = DB::connect($config, self::CONNECTION);
+        } elseif ($conn->getSelectedDatabase() !== $database) {
+            // Tests switch the default connection to a temporary database.
+            $conn->selectDatabase($database);
+        }
+
+        return $conn;
     }
 
     /**
@@ -174,7 +210,7 @@ class DevTaskRunMonitor
             $this->savedBytes += strlen($chunk);
         }
 
-        DB::prepared_query(
+        self::conn()->preparedQuery(
             'UPDATE "DevTaskRun" SET "Output" = CONCAT(COALESCE("Output", \'\'), ?) WHERE "ID" = ?',
             [$chunk, $this->runID]
         );
@@ -198,7 +234,7 @@ class DevTaskRunMonitor
 
         $this->saveOutput();
 
-        $requested = DB::prepared_query(
+        $requested = self::conn()->preparedQuery(
             'SELECT "CancelRequested" FROM "DevTaskRun" WHERE "ID" = ?',
             [$this->runID]
         )->value();
@@ -231,7 +267,7 @@ class DevTaskRunMonitor
         $this->saveOutput();
 
         $now = SS_Datetime::now()->getValue();
-        DB::prepared_query(
+        self::conn()->preparedQuery(
             'UPDATE "DevTaskRun"'
             . ' SET "Status" = ?, "FinishDate" = ?, "FailureReason" = ?, "LastEdited" = ?'
             . ' WHERE "ID" = ? AND "Status" = \'Running\'',
