@@ -56,6 +56,9 @@ class DevTaskRunMonitor
      */
     protected static $reservedMemory = null;
 
+    /** @var DevTaskRun */
+    protected $run;
+
     /** @var int */
     protected $runID;
 
@@ -85,6 +88,7 @@ class DevTaskRunMonitor
 
     public function __construct(DevTaskRun $run)
     {
+        $this->run = $run;
         $this->runID = (int) $run->ID;
     }
 
@@ -144,6 +148,47 @@ class DevTaskRunMonitor
     }
 
     /**
+     * Runs the callback with SIGTERM and SIGINT held back. A signal that
+     * arrives meanwhile is handled when the callback returns.
+     *
+     * @return mixed What the callback returns.
+     */
+    public static function withSignalsDeferred(callable $callback)
+    {
+        if (!function_exists('pcntl_sigprocmask')) {
+            return $callback();
+        }
+
+        pcntl_sigprocmask(SIG_BLOCK, [SIGTERM, SIGINT], $previous);
+        try {
+            return $callback();
+        } finally {
+            pcntl_sigprocmask(SIG_SETMASK, $previous);
+        }
+    }
+
+    /**
+     * Claims the run for this process and makes this the current monitor, so
+     * that a signal or shutdown from now on marks the run as ended. Output is
+     * not captured until start().
+     *
+     * @return bool True if this process claimed the run.
+     */
+    public function claim(string $host): bool
+    {
+        return self::withSignalsDeferred(function () use ($host): bool {
+            if (!$this->run->claim($host)) {
+                return false;
+            }
+
+            $this->startTime = time();
+            self::$current = $this;
+
+            return true;
+        });
+    }
+
+    /**
      * Starts capturing output for the run.
      */
     public function start(): void
@@ -167,14 +212,18 @@ class DevTaskRunMonitor
     public function handleOutput($buffer, $phase): string
     {
         $this->inOutputHandler = true;
-        $this->pendingOutput .= $buffer;
+
+        // While saves fail, keep only what still fits in the column.
+        if (strlen($this->pendingOutput) <= self::OUTPUT_LIMIT - $this->savedBytes) {
+            $this->pendingOutput .= $buffer;
+        }
 
         $interval = (int) Config::inst()->get('DevTaskRunMonitor', 'output_save_interval');
         if (time() - $this->lastSave >= $interval) {
             try {
                 $this->saveOutput();
             } catch (Throwable $e) {
-                // Keep the task running. The output is saved again at the end.
+                // Keep the task running. The output is kept and saved again later.
             }
         }
 
@@ -194,22 +243,34 @@ class DevTaskRunMonitor
             return;
         }
 
-        $chunk = $this->pendingOutput;
-        $this->pendingOutput = '';
-
         $room = self::OUTPUT_LIMIT - $this->savedBytes;
         if ($room <= 0) {
+            $this->pendingOutput = '';
             return;
         }
+
+        // SilverStripe runs MySQL in ANSI mode, not strict mode, so MySQL cuts
+        // a string short at the first invalid UTF-8 byte instead of failing.
+        $chunk = mb_scrub($this->pendingOutput, 'UTF-8');
+        $savedBytes = $this->savedBytes + strlen($chunk);
 
         if (strlen($chunk) > $room) {
             $chunk = mb_strcut($chunk, 0, $room, 'UTF-8')
                 . "\n[Output truncated: it was longer than " . self::OUTPUT_LIMIT . " bytes.]\n";
-            $this->savedBytes = self::OUTPUT_LIMIT;
-        } else {
-            $this->savedBytes += strlen($chunk);
+            $savedBytes = self::OUTPUT_LIMIT;
         }
 
+        // Cleared only after the save, so that a failed save is tried again.
+        // A signal between the save and the clear would save the chunk twice.
+        self::withSignalsDeferred(function () use ($chunk, $savedBytes): void {
+            $this->appendOutput($chunk);
+            $this->pendingOutput = '';
+            $this->savedBytes = $savedBytes;
+        });
+    }
+
+    protected function appendOutput(string $chunk): void
+    {
         self::conn()->preparedQuery(
             'UPDATE "DevTaskRun" SET "Output" = CONCAT(COALESCE("Output", \'\'), ?) WHERE "ID" = ?',
             [$chunk, $this->runID]
@@ -254,25 +315,42 @@ class DevTaskRunMonitor
      */
     public function finish(string $status, ?string $failureReason = null): void
     {
-        if ($this->finished) {
-            return;
-        }
-        $this->finished = true;
+        // Stop signals wait until the status is saved. Otherwise the signal
+        // handler could exit the process before the status is saved. The flag
+        // is set inside, so a signal that arrives first still saves a status.
+        self::withSignalsDeferred(function () use ($status, $failureReason): void {
+            if ($this->finished) {
+                return;
+            }
+            $this->finished = true;
 
-        if (self::$current === $this) {
-            self::$current = null;
-        }
+            try {
+                $this->closeBuffers();
 
-        $this->closeBuffers();
-        $this->saveOutput();
+                try {
+                    $this->saveOutput();
+                } catch (Throwable $e) {
+                    $this->noteOutputSaveFailure($e);
+                }
 
-        $now = SS_Datetime::now()->getValue();
-        self::conn()->preparedQuery(
-            'UPDATE "DevTaskRun"'
-            . ' SET "Status" = ?, "FinishDate" = ?, "FailureReason" = ?, "LastEdited" = ?'
-            . ' WHERE "ID" = ? AND "Status" = \'Running\'',
-            [$status, $now, $failureReason, $now, $this->runID]
-        );
+                $now = SS_Datetime::now()->getValue();
+                self::conn()->preparedQuery(
+                    'UPDATE "DevTaskRun"'
+                    . ' SET "Status" = ?, "FinishDate" = ?, "FailureReason" = ?, "LastEdited" = ?'
+                    . ' WHERE "ID" = ? AND "Status" = \'Running\'',
+                    [$status, $now, $failureReason, $now, $this->runID]
+                );
+            } finally {
+                if (self::$current === $this) {
+                    self::$current = null;
+                }
+            }
+        });
+    }
+
+    public function getRun(): DevTaskRun
+    {
+        return $this->run;
     }
 
     public function getRunID(): int
@@ -295,7 +373,8 @@ class DevTaskRunMonitor
     protected function closeBuffers(): void
     {
         // PHP does not allow output buffer functions inside an output handler.
-        if ($this->inOutputHandler) {
+        // A level of 0 means start() was not called, so there is no buffer.
+        if ($this->inOutputHandler || !$this->bufferLevel) {
             return;
         }
 
@@ -303,6 +382,18 @@ class DevTaskRunMonitor
             if (!@ob_end_flush()) {
                 break;
             }
+        }
+    }
+
+    /**
+     * Adds a note about a failed output save to the run. The final status must
+     * still be saved, so a failure here is ignored.
+     */
+    protected function noteOutputSaveFailure(Throwable $e): void
+    {
+        try {
+            $this->appendOutput("\n[Some output could not be saved: " . mb_scrub($e->getMessage(), 'UTF-8') . "]\n");
+        } catch (Throwable $ignored) {
         }
     }
 

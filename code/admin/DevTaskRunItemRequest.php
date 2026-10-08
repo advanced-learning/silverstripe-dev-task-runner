@@ -5,6 +5,19 @@
  */
 class DevTaskRunItemRequest extends GridFieldDetailForm_ItemRequest
 {
+    /**
+     * SilverStripe checks the allowed actions of the class that declares the
+     * method, so the overridden ItemEditForm must be listed again here.
+     * doCancelRun is listed so that a click still reaches it after the run has
+     * ended and the button is gone from the form.
+     *
+     * @var array
+     */
+    private static $allowed_actions = [
+        'ItemEditForm',
+        'doCancelRun',
+    ];
+
     public function ItemEditForm()
     {
         $form = parent::ItemEditForm();
@@ -24,8 +37,17 @@ class DevTaskRunItemRequest extends GridFieldDetailForm_ItemRequest
         return $form;
     }
 
-    public function doCancelRun($data, $form)
+    /**
+     * @param array|SS_HTTPRequest $data
+     * @param Form|null $form Null when the action is called by URL, not by a form submission.
+     */
+    public function doCancelRun($data, $form = null)
     {
+        // Only a form submission has passed the CSRF check.
+        if (!$form instanceof Form) {
+            return $this->httpError(404);
+        }
+
         $controller = $this->getToplevelController();
 
         if (!$this->record->canEdit()) {

@@ -165,6 +165,179 @@ class DevTaskRunnerTest extends SapphireTest
         $this->assertNull(DevTaskRunMonitor::current());
     }
 
+    public function testFormActionsAreAllowedOnItemRequest()
+    {
+        $request = new DevTaskRunItemRequest(null, null, $this->createRun('Queued'), null, 'DetailForm');
+
+        $this->assertTrue($request->checkAccessAction('ItemEditForm'));
+        // Reached even when the run has ended and the button is gone.
+        $this->assertTrue($request->checkAccessAction('doCancelRun'));
+    }
+
+    public function testCancelActionCalledByUrlReturnsNotFound()
+    {
+        $run = $this->createRun('Queued');
+        $request = new DevTaskRunItemRequest(null, null, $run, null, 'DetailForm');
+
+        try {
+            $request->doCancelRun(new SS_HTTPRequest('GET', 'doCancelRun'));
+            $this->fail('Expected a 404');
+        } catch (SS_HTTPResponse_Exception $e) {
+            $this->assertEquals(404, $e->getResponse()->getStatusCode());
+        }
+
+        $this->assertEquals('Queued', DevTaskRun::get()->byID($run->ID)->Status);
+    }
+
+    public function testSignalWaitsUntilDeferredCallbackReturns()
+    {
+        if (!function_exists('pcntl_sigprocmask') || !function_exists('posix_kill')) {
+            $this->markTestSkipped('Needs the pcntl and posix extensions.');
+        }
+
+        $received = [];
+        $previousHandler = pcntl_signal_get_handler(SIGINT);
+        pcntl_signal(SIGINT, function ($signal) use (&$received) {
+            $received[] = $signal;
+        });
+
+        try {
+            DevTaskRunMonitor::withSignalsDeferred(function () use (&$received) {
+                posix_kill(getmypid(), SIGINT);
+                pcntl_signal_dispatch();
+                $this->assertEmpty($received, 'The signal was handled inside the callback');
+            });
+            pcntl_signal_dispatch();
+
+            $this->assertEquals([SIGINT], $received);
+        } finally {
+            pcntl_signal(SIGINT, $previousHandler);
+        }
+    }
+
+    public function testShutdownAfterClaimMarksRunAsError()
+    {
+        $run = $this->createRun('Queued');
+        $monitor = new DevTaskRunMonitor($run);
+
+        $this->assertTrue($monitor->claim('pod-a'));
+        $this->assertSame($monitor, DevTaskRunMonitor::current());
+
+        error_clear_last();
+        DevTaskRunMonitor::handleShutdown();
+
+        $this->assertNull(DevTaskRunMonitor::current());
+        $this->assertEquals('Error', DevTaskRun::get()->byID($run->ID)->Status);
+    }
+
+    public function testFinishSavesStatusWhenOutputCannotBeSaved()
+    {
+        $run = $this->createRun('Queued');
+        $monitor = new DevTaskRunnerTest_Monitor($run);
+        $monitor->claim('pod-a');
+        $monitor->start();
+        Config::inst()->update('DevTaskRunMonitor', 'output_save_interval', 3600);
+        echo 'lost';
+        $monitor->failuresLeft = 1;
+        $monitor->finish('Finished');
+
+        $this->assertNull(DevTaskRunMonitor::current());
+        $saved = DevTaskRun::get()->byID($run->ID);
+        $this->assertEquals('Finished', $saved->Status);
+        $this->assertStringContainsString('[Some output could not be saved: Output save failed]', $saved->Output);
+    }
+
+    public function testOutputFromAFailedSaveIsSavedLater()
+    {
+        $run = $this->createRun('Queued');
+        $monitor = new DevTaskRunnerTest_Monitor($run);
+        $monitor->claim('pod-a');
+        $monitor->start();
+        $monitor->failuresLeft = 1;
+        echo 'first ';
+        echo 'second';
+        $monitor->finish('Finished');
+
+        $this->assertEquals('first second', DevTaskRun::get()->byID($run->ID)->Output);
+    }
+
+    public function testOutputStopsGrowingWhileSavesFail()
+    {
+        $run = $this->createRun('Queued');
+        $monitor = new DevTaskRunnerTest_Monitor($run);
+        $monitor->claim('pod-a');
+        $monitor->start();
+        $monitor->failuresLeft = PHP_INT_MAX;
+        echo str_repeat('x', DevTaskRunMonitor::OUTPUT_LIMIT);
+        echo 'kept';
+        echo 'dropped';
+
+        $this->assertEquals(DevTaskRunMonitor::OUTPUT_LIMIT + 4, $monitor->pendingBytes());
+
+        $monitor->failuresLeft = 0;
+        $monitor->finish('Finished');
+
+        $output = DevTaskRun::get()->byID($run->ID)->Output;
+        $this->assertStringContainsString('[Output truncated', $output);
+        $this->assertStringNotContainsString('dropped', $output);
+    }
+
+    public function testSignalDuringOutputSaveDoesNotSaveTwice()
+    {
+        if (!function_exists('pcntl_sigprocmask') || !function_exists('posix_kill')) {
+            $this->markTestSkipped('Needs the pcntl and posix extensions.');
+        }
+
+        $run = $this->createRun('Queued');
+        $monitor = new DevTaskRunnerTest_Monitor($run);
+        $monitor->claim('pod-a');
+        $monitor->start();
+        Config::inst()->update('DevTaskRunMonitor', 'output_save_interval', 3600);
+        echo 'once';
+
+        $previousHandler = pcntl_signal_get_handler(SIGINT);
+        pcntl_signal(SIGINT, function () use ($monitor) {
+            $monitor->finish('Error', 'Stopped by a signal');
+        });
+
+        try {
+            $monitor->signalAfterAppend = true;
+            $monitor->saveOutput();
+            pcntl_signal_dispatch();
+        } finally {
+            pcntl_signal(SIGINT, $previousHandler);
+        }
+
+        $saved = DevTaskRun::get()->byID($run->ID);
+        $this->assertEquals('Error', $saved->Status);
+        $this->assertEquals('once', $saved->Output);
+    }
+
+    public function testInvalidUtf8OutputIsSaved()
+    {
+        $run = $this->createRun('Queued');
+        $monitor = new DevTaskRunMonitor($run);
+        $monitor->claim('pod-a');
+        $monitor->start();
+        echo "before \xff after";
+        $monitor->finish('Finished');
+
+        $this->assertEquals('before ? after', DevTaskRun::get()->byID($run->ID)->Output);
+    }
+
+    public function testTransactionLeftOpenByTaskIsRolledBack()
+    {
+        $marker = $this->createRun('Draft', 'unchanged');
+        $failing = $this->createRun('Queued', 'mode=leaveTransactionOpen markerID=' . $marker->ID);
+        $next = $this->createRun('Queued');
+
+        $this->process();
+
+        $this->assertEquals('Error', DevTaskRun::get()->byID($failing->ID)->Status);
+        $this->assertEquals('Finished', DevTaskRun::get()->byID($next->ID)->Status);
+        $this->assertEquals('unchanged', DevTaskRun::get()->byID($marker->ID)->Params);
+    }
+
     public function testShutdownDuringRunMarksRunAsError()
     {
         $run = $this->createRun('Queued');
@@ -355,8 +528,51 @@ class DevTaskRunnerTest_Task extends BuildTask implements TestOnly
                     DB::get_conn()->transactionRollback();
                 }
                 return;
+            case 'leaveTransactionOpen':
+                DB::get_conn()->transactionStart();
+                DB::prepared_query(
+                    'UPDATE "DevTaskRun" SET "Params" = ? WHERE "ID" = ?',
+                    ['changed', (int) $request->getVar('markerID')]
+                );
+                throw new RuntimeException('Task failed inside a transaction');
             default:
                 echo 'hello ' . $request->getVar('name');
+        }
+    }
+}
+
+class DevTaskRunnerTest_Monitor extends DevTaskRunMonitor implements TestOnly
+{
+    /**
+     * The number of output saves that fail before saves work again.
+     * @var int
+     */
+    public $failuresLeft = 0;
+
+    /**
+     * Sends this process a SIGINT right after the next successful save.
+     * @var bool
+     */
+    public $signalAfterAppend = false;
+
+    public function pendingBytes(): int
+    {
+        return strlen($this->pendingOutput);
+    }
+
+    protected function appendOutput(string $chunk): void
+    {
+        if ($this->failuresLeft > 0) {
+            $this->failuresLeft--;
+            throw new RuntimeException('Output save failed');
+        }
+
+        parent::appendOutput($chunk);
+
+        if ($this->signalAfterAppend) {
+            $this->signalAfterAppend = false;
+            posix_kill(getmypid(), SIGINT);
+            pcntl_signal_dispatch();
         }
     }
 }
