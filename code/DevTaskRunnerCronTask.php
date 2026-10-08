@@ -47,8 +47,9 @@ class DevTaskRunnerCronTask implements CronTask
         if ($this->nextTask) {
             echo "A specific task was provided. It will be run first.\n";
 
-            if ($this->nextTask->claim($host)) {
-                $this->runTask($this->nextTask);
+            $monitor = new DevTaskRunMonitor($this->nextTask);
+            if ($monitor->claim($host)) {
+                $this->runTask($monitor);
                 $ran++;
             } else {
                 echo 'Task ' . $this->nextTask->ID . " is not queued, or another process claimed it. Skipping it.\n";
@@ -58,14 +59,14 @@ class DevTaskRunnerCronTask implements CronTask
         echo "Running tasks from the queue. Max tasks: " . self::$maxTasksPerRun . "\n";
 
         while ($ran < self::$maxTasksPerRun) {
-            $taskFromQueue = $this->claimNextQueued($host);
+            $monitor = $this->claimNextQueued($host);
 
             // If the queue is empty, stop.
-            if (!$taskFromQueue) {
+            if (!$monitor) {
                 break;
             }
 
-            $this->runTask($taskFromQueue);
+            $this->runTask($monitor);
             $ran++;
         }
 
@@ -83,9 +84,9 @@ class DevTaskRunnerCronTask implements CronTask
      *
      * @param string $host
      *
-     * @return DevTaskRun|null
+     * @return DevTaskRunMonitor|null The monitor of the claimed run.
      */
-    private function claimNextQueued(string $host): ?DevTaskRun
+    private function claimNextQueued(string $host): ?DevTaskRunMonitor
     {
         // A lost claim leaves that run Running, so the next query skips it.
         // The limit only stops a loop if claims keep failing.
@@ -100,8 +101,9 @@ class DevTaskRunnerCronTask implements CronTask
                 return null;
             }
 
-            if ($taskFromQueue->claim($host)) {
-                return $taskFromQueue;
+            $monitor = new DevTaskRunMonitor($taskFromQueue);
+            if ($monitor->claim($host)) {
+                return $monitor;
             }
         }
 
@@ -109,15 +111,15 @@ class DevTaskRunnerCronTask implements CronTask
     }
 
     /**
-     * Executes a single DevTaskRun record. The run must already be claimed.
+     * Executes a single DevTaskRun record.
      *
-     * @param DevTaskRun $taskToRun The task object to run.
+     * @param DevTaskRunMonitor $monitor The monitor that claimed the run.
      */
-    private function runTask(DevTaskRun $taskToRun)
+    private function runTask(DevTaskRunMonitor $monitor)
     {
+        $taskToRun = $monitor->getRun();
         echo 'Starting task: ' . $taskToRun->TaskTitle() . ' (ID: ' . $taskToRun->ID . ")\n";
 
-        $monitor = new DevTaskRunMonitor($taskToRun);
         $monitor->start();
 
         $status = 'Finished';
@@ -135,6 +137,16 @@ class DevTaskRunnerCronTask implements CronTask
             $status = 'Error';
             $failureReason = get_class($e) . ': ' . $e->getMessage();
             echo "\n" . $e;
+        }
+
+        // A transaction that the task left open would hold its locks, and the
+        // next claim would run inside it. Its changes would be lost anyway when
+        // the process ends. This does not check supportsTransactions(), because
+        // a database can report false and still let a task start a transaction.
+        try {
+            DB::get_conn()->transactionRollback();
+        } catch (Throwable $e) {
+            // Some databases throw when no transaction is open.
         }
 
         $monitor->finish($status, $failureReason);
