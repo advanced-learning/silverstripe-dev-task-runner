@@ -315,14 +315,15 @@ class DevTaskRunMonitor
      */
     public function finish(string $status, ?string $failureReason = null): void
     {
-        if ($this->finished) {
-            return;
-        }
-        $this->finished = true;
-
         // Stop signals wait until the status is saved. Otherwise the signal
-        // handler could exit the process before the status is saved.
+        // handler could exit the process before the status is saved. The flag
+        // is set inside, so a signal that arrives first still saves a status.
         self::withSignalsDeferred(function () use ($status, $failureReason): void {
+            if ($this->finished) {
+                return;
+            }
+            $this->finished = true;
+
             try {
                 $this->closeBuffers();
 
