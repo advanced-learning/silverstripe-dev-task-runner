@@ -37,8 +37,17 @@ class DevTaskRunItemRequest extends GridFieldDetailForm_ItemRequest
         return $form;
     }
 
-    public function doCancelRun($data, $form)
+    /**
+     * @param array|SS_HTTPRequest $data
+     * @param Form|null $form Null when the action is called by URL, not by a form submission.
+     */
+    public function doCancelRun($data, $form = null)
     {
+        // Only a form submission has passed the CSRF check.
+        if (!$form instanceof Form) {
+            return $this->httpError(404);
+        }
+
         $controller = $this->getToplevelController();
 
         if (!$this->record->canEdit()) {

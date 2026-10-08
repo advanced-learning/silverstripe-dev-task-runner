@@ -212,7 +212,11 @@ class DevTaskRunMonitor
     public function handleOutput($buffer, $phase): string
     {
         $this->inOutputHandler = true;
-        $this->pendingOutput .= $buffer;
+
+        // While saves fail, keep only what still fits in the column.
+        if (strlen($this->pendingOutput) <= self::OUTPUT_LIMIT - $this->savedBytes) {
+            $this->pendingOutput .= $buffer;
+        }
 
         $interval = (int) Config::inst()->get('DevTaskRunMonitor', 'output_save_interval');
         if (time() - $this->lastSave >= $interval) {
@@ -256,11 +260,13 @@ class DevTaskRunMonitor
             $savedBytes = self::OUTPUT_LIMIT;
         }
 
-        $this->appendOutput($chunk);
-
         // Cleared only after the save, so that a failed save is tried again.
-        $this->pendingOutput = '';
-        $this->savedBytes = $savedBytes;
+        // A signal between the save and the clear would save the chunk twice.
+        self::withSignalsDeferred(function () use ($chunk, $savedBytes): void {
+            $this->appendOutput($chunk);
+            $this->pendingOutput = '';
+            $this->savedBytes = $savedBytes;
+        });
     }
 
     protected function appendOutput(string $chunk): void
